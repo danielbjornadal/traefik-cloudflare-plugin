@@ -1,4 +1,4 @@
-displayName: "X-Forwarded-For Fix for Cloudflare Proxy"
+displayName: "Cloudflare Real-Client-IP Middleware"
 type: middleware
 import: github.com/danielbjornadal/traefik-cloudflare-plugin
 iconPath: .assets/icon.png

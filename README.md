@@ -1,4 +1,4 @@
-# Traefik Cloudflare Plugin
+# Cloudflare Real-Client-IP Middleware
 
 A Traefik middleware plugin that securely handles X-Forwarded-For headers when using Cloudflare as a reverse proxy. This plugin prevents IP spoofing attacks while ensuring proper IP detection for downstream middlewares like `ipAllowList`.
 
