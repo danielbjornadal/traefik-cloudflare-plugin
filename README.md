@@ -49,7 +49,7 @@ experimental:
   plugins:
     traefik_cloudflare_plugin:
       moduleName: github.com/danielbjornadal/traefik-cloudflare-plugin
-      version: v0.0.5
+      version: v1.0.2
 ```
 
 ## Configuration
