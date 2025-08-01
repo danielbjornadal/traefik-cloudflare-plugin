@@ -48,8 +48,8 @@ Add the plugin to your Traefik configuration:
 experimental:
   plugins:
     traefik_cloudflare_plugin:
-      modulename: "github.com/danielbjornadal/traefik-cloudflare-plugin"
-      version: "v1.0.0"
+      moduleName: github.com/danielbjornadal/traefik-cloudflare-plugin
+      version: v0.0.5
 ```
 
 ## Configuration
@@ -57,37 +57,39 @@ experimental:
 ### Basic Configuration
 
 ```yaml
-http:
-  middlewares:
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: traefik-cloudflare-plugin
+spec:
+  plugin:
     traefik_cloudflare_plugin:
-      plugin:
-        traefik_cloudflare_plugin:
-          trustedProxyRanges:
-            - 173.245.48.0/20 # Cloudflare IPv4
-            - 103.21.244.0/22 # Cloudflare IPv4
-            - 103.22.200.0/22 # Cloudflare IPv4
-            - 103.31.4.0/22 # Cloudflare IPv4
-            - 141.101.64.0/18 # Cloudflare IPv4
-            - 108.162.192.0/18 # Cloudflare IPv4
-            - 190.93.240.0/20 # Cloudflare IPv4
-            - 188.114.96.0/20 # Cloudflare IPv4
-            - 197.234.240.0/22 # Cloudflare IPv4
-            - 198.41.128.0/17 # Cloudflare IPv4
-            - 162.158.0.0/15 # Cloudflare IPv4
-            - 104.16.0.0/13 # Cloudflare IPv4
-            - 104.24.0.0/14 # Cloudflare IPv4
-            - 172.64.0.0/13 # Cloudflare IPv4
-            - 131.0.72.0/22 # Cloudflare IPv4
-            - 2400:cb00::/32 # Cloudflare IPv6
-            - 2606:4700::/32 # Cloudflare IPv6
-            - 2803:f800::/32 # Cloudflare IPv6
-            - 2405:b500::/32 # Cloudflare IPv6
-            - 2405:8100::/32 # Cloudflare IPv6
-            - 2a06:98c0::/29 # Cloudflare IPv6
-            - 2c0f:f248::/32 # Cloudflare IPv6
-          directRanges:
-            - 0.0.0.0/0 # Allow any non-Cloudflare source to be treated as direct
-          header: X-Forwarded-For
+      trustedProxyRanges:
+        - 173.245.48.0/20 # Cloudflare IPv4
+        - 103.21.244.0/22 # Cloudflare IPv4
+        - 103.22.200.0/22 # Cloudflare IPv4
+        - 103.31.4.0/22 # Cloudflare IPv4
+        - 141.101.64.0/18 # Cloudflare IPv4
+        - 108.162.192.0/18 # Cloudflare IPv4
+        - 190.93.240.0/20 # Cloudflare IPv4
+        - 188.114.96.0/20 # Cloudflare IPv4
+        - 197.234.240.0/22 # Cloudflare IPv4
+        - 198.41.128.0/17 # Cloudflare IPv4
+        - 162.158.0.0/15 # Cloudflare IPv4
+        - 104.16.0.0/13 # Cloudflare IPv4
+        - 104.24.0.0/14 # Cloudflare IPv4
+        - 172.64.0.0/13 # Cloudflare IPv4
+        - 131.0.72.0/22 # Cloudflare IPv4
+        - 2400:cb00::/32 # Cloudflare IPv6
+        - 2606:4700::/32 # Cloudflare IPv6
+        - 2803:f800::/32 # Cloudflare IPv6
+        - 2405:b500::/32 # Cloudflare IPv6
+        - 2405:8100::/32 # Cloudflare IPv6
+        - 2a06:98c0::/29 # Cloudflare IPv6
+        - 2c0f:f248::/32 # Cloudflare IPv6
+      directRanges:
+        - 0.0.0.0/0 # Allow any non-Cloudflare source to be treated as direct
+      header: X-Forwarded-For
 ```
 
 ### Advanced Configuration
@@ -95,20 +97,22 @@ http:
 You can customize which IP ranges are treated as direct connections:
 
 ```yaml
-http:
-  middlewares:
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: traefik-cloudflare-plugin
+spec:
+  plugin:
     traefik_cloudflare_plugin:
-      plugin:
-        traefik_cloudflare_plugin:
-          trustedProxyRanges:
-            - 173.245.48.0/20 # Cloudflare IPv4
-            - 103.21.244.0/22 # Cloudflare IPv4
-            # ... other Cloudflare ranges
-          directRanges:
-            - 10.0.0.0/8 # Your internal network
-            - 192.168.0.0/16 # Your internal network
-            - 172.16.0.0/12 # Your internal network
-          header: X-Forwarded-For # Optional, defaults to X-Forwarded-For
+      trustedProxyRanges:
+        - 173.245.48.0/20 # Cloudflare IPv4
+        - 103.21.244.0/22 # Cloudflare IPv4
+        # ... other Cloudflare ranges
+      directRanges:
+        - 10.0.0.0/8 # Your internal network
+        - 192.168.0.0/16 # Your internal network
+        - 172.16.0.0/12 # Your internal network
+      header: X-Forwarded-For # Optional, defaults to X-Forwarded-For
 ```
 
 ## Usage
@@ -118,12 +122,22 @@ http:
 Attach the middleware **before** your `ipAllowList` middleware:
 
 ```yaml
-routers:
-  myapp:
-    rule: "Host(`example.com`)"
-    entryPoints: ["websecure"]
-    middlewares: ["traefik_cloudflare_plugin", "allowlist"] # Order matters!
-    service: myapp
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: myapp
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`example.com`)
+      kind: Rule
+      services:
+        - name: myapp
+          port: 80
+      middlewares:
+        - name: traefik-cloudflare-plugin # Order matters!
+        - name: allowlist
 ```
 
 ### With IP Allow List
@@ -131,15 +145,17 @@ routers:
 Now your `ipAllowList` can safely use `ipStrategy.depth: 1`:
 
 ```yaml
-http:
-  middlewares:
-    allowlist:
-      ipAllowList:
-        ipStrategy:
-          depth: 1 # Safe to use depth 1 after traefik_cloudflare_plugin
-        sourceRange:
-          - 10.0.0.0/8
-          - 192.168.0.0/16
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: allowlist
+spec:
+  ipAllowList:
+    ipStrategy:
+      depth: 1 # Safe to use depth 1 after traefik_cloudflare_plugin
+    sourceRange:
+      - 10.0.0.0/8
+      - 192.168.0.0/16
 ```
 
 ## Security Benefits
