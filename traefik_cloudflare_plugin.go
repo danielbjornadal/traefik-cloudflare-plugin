@@ -1,4 +1,4 @@
-package xfffix
+package main
 
 import (
     "context"
@@ -21,9 +21,9 @@ import (
 // ````yaml
 // http:
 //   middlewares:
-//     xfffix:
+//     traefik_cloudflare_plugin:
 //       plugin:
-//         xfffix:
+//         traefik_cloudflare_plugin:
 //           trustedProxyRanges:
 //             - 173.245.48.0/20   # Cloudflare IPv4
 //             - 103.21.244.0/22   # …
@@ -39,7 +39,7 @@ import (
 //   myapp:
 //     rule: "Host(`example.com`)"
 //     entryPoints: ["websecure"]
-//     middlewares: ["xfffix", "allowlist"]
+//     middlewares: ["traefik_cloudflare_plugin", "allowlist"]
 //     service: myapp
 // ````
 //
@@ -48,12 +48,12 @@ import (
 // Security model:
 //   1. If the request comes from a trusted proxy, we leave XFF untouched.
 //   2. Otherwise we *override* XFF with the immediate remote address (preventing header spoofing).
-//   3. If XFF is empty and remote isn’t trusted, we inject the remote address so that downstream
+//   3. If XFF is empty and remote isn't trusted, we inject the remote address so that downstream
 //      middlewares like ipAllowList have something to work with.
 //
 // All CIDR parsing and membership checks are done with the stdlib net package – no external deps.
 //
-// Inspired by Traefik’s demo plugin pattern.  (See https://plugins.traefik.io/plugins/628c9ee2108ecc83915d7764/demo-plugin)
+// Inspired by Traefik's demo plugin pattern.  (See https://plugins.traefik.io/plugins/628c9ee2108ecc83915d7764/demo-plugin)
 //
 // Released under MIT License.
 //

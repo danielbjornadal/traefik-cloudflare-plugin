@@ -36,7 +36,7 @@ git clone https://github.com/danielbjornadal/traefik-cloudflare-plugin.git
 cd traefik-cloudflare-plugin
 
 # Build the plugin
-go build -o xfffix.so -buildmode=plugin xfffix.go
+go build -buildmode=plugin -o traefik_cloudflare_plugin.so
 ```
 
 ### Traefik Configuration
@@ -47,7 +47,7 @@ Add the plugin to your Traefik configuration:
 # traefik.yml or dynamic configuration
 experimental:
   plugins:
-    xfffix:
+    traefik_cloudflare_plugin:
       modulename: "github.com/danielbjornadal/traefik-cloudflare-plugin"
       version: "v1.0.0"
 ```
@@ -59,9 +59,9 @@ experimental:
 ```yaml
 http:
   middlewares:
-    xfffix:
+    traefik_cloudflare_plugin:
       plugin:
-        xfffix:
+        traefik_cloudflare_plugin:
           trustedProxyRanges:
             - 173.245.48.0/20 # Cloudflare IPv4
             - 103.21.244.0/22 # Cloudflare IPv4
@@ -97,9 +97,9 @@ You can customize which IP ranges are treated as direct connections:
 ```yaml
 http:
   middlewares:
-    xfffix:
+    traefik_cloudflare_plugin:
       plugin:
-        xfffix:
+        traefik_cloudflare_plugin:
           trustedProxyRanges:
             - 173.245.48.0/20 # Cloudflare IPv4
             - 103.21.244.0/22 # Cloudflare IPv4
@@ -122,7 +122,7 @@ routers:
   myapp:
     rule: "Host(`example.com`)"
     entryPoints: ["websecure"]
-    middlewares: ["xfffix", "allowlist"] # Order matters!
+    middlewares: ["traefik_cloudflare_plugin", "allowlist"] # Order matters!
     service: myapp
 ```
 
@@ -136,7 +136,7 @@ http:
     allowlist:
       ipAllowList:
         ipStrategy:
-          depth: 1 # Safe to use depth 1 after xfffix
+          depth: 1 # Safe to use depth 1 after traefik_cloudflare_plugin
         sourceRange:
           - 10.0.0.0/8
           - 192.168.0.0/16

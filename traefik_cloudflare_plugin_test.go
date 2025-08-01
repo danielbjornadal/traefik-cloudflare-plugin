@@ -1,4 +1,4 @@
-package xfffix
+package main
 
 import (
 	"context"
