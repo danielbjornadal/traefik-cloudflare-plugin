@@ -134,9 +134,27 @@ spec:
 
 ## Security notes
 
-1. **`CF-Connecting-IP` / `X-Forwarded-For` are only trusted when `RemoteAddr` is in your trusted CIDRs.**
-2. Keep trusted ranges accurate; overly wide lists weaken spoofing protection.
-3. Optional fetch uses the Go standard library HTTP client only (no extra modules).
+### 1. Headers are trusted only for trusted TCP peers
+
+The plugin uses the **immediate TCP client** (`RemoteAddr`) to decide whether `CF-Connecting-IP` and `X-Forwarded-For` may influence the resolved IP.
+
+**Safe (typical Cloudflare path):** The connection to Traefik comes from `162.158.x.x` (inside your Cloudflare trusted ranges). Cloudflare sets `CF-Connecting-IP: 203.0.113.5`. The plugin normalizes to `203.0.113.5`.
+
+**Safe (typical direct path):** A browser connects from `198.51.100.10` (not in trusted ranges). The client may send `CF-Connecting-IP: 10.0.0.1` or a forged `X-Forwarded-For`; those are **ignored**. Headers are set to `198.51.100.10`.
+
+**Middleware order:** This middleware must run **before** `ipAllowList` (or any rule that reads `X-Forwarded-For` / `X-Real-IP`). Otherwise another layer may trust spoofed headers first.
+
+### 2. Keep trusted CIDRs minimal
+
+Anyone who can open a TCP connection **from** an address inside your trusted list can supply headers that the plugin will treat like a real proxy.
+
+**Risky:** `trustedProxyRanges: [0.0.0.0/0, ::/0]` (or an enormous corporate supernet attackers can reach) makes **every** client “trusted,” so forged `CF-Connecting-IP` / leftmost `X-Forwarded-For` can impersonate any IP and **bypass an allowlist** that uses the normalized headers.
+
+**Better:** Cloudflare’s published ranges (via **`fetchCloudflareRanges`** or a static list) plus **only** the CIDRs of **your** load balancers or ingress that legitimately terminate in front of Traefik (for example `193.53.88.88/29`).
+
+### 3. Optional fetch and dependencies
+
+When **`fetchCloudflareRanges: true`**, the plugin calls Cloudflare’s public API **once at middleware init** using Go’s **`net/http`** only—no extra Go modules. That request does not run per request; it only builds the trusted CIDR list at startup (or on dynamic reload, depending on Traefik).
 
 ## Cloudflare IP ranges
 
