@@ -3,33 +3,14 @@ type: middleware
 import: github.com/danielbjornadal/traefik-cloudflare-plugin
 iconPath: .assets/icon.png
 
-summary: "Securely handles X-Forwarded-For headers when using Cloudflare as a reverse proxy. Prevents IP spoofing attacks while ensuring proper IP detection for downstream middlewares like ipAllowList."
+summary: "Securely handles X-Forwarded-For and X-Real-IP when using Cloudflare (or other trusted proxies) in front of Traefik. Optional fetch of Cloudflare IP ranges, plus normalization for ipAllowList."
 
 testData:
   disableDefault: false
+  fetchCloudflareRanges: true
+  cloudflareRangesHTTPTimeout: 5s
   trustedProxyRanges:
-    - 173.245.48.0/20
-    - 103.21.244.0/22
-    - 103.22.200.0/22
-    - 103.31.4.0/22
-    - 141.101.64.0/18
-    - 108.162.192.0/18
-    - 190.93.240.0/20
-    - 188.114.96.0/20
-    - 197.234.240.0/22
-    - 198.41.128.0/17
-    - 162.158.0.0/15
-    - 104.16.0.0/13
-    - 104.24.0.0/14
-    - 172.64.0.0/13
-    - 131.0.72.0/22
-    - 2400:cb00::/32
-    - 2606:4700::/32
-    - 2803:f800::/32
-    - 2405:b500::/32
-    - 2405:8100::/32
-    - 2a06:98c0::/29
-    - 2c0f:f248::/32
+    - 193.53.88.88/29
   directRanges:
     - 0.0.0.0/0
     - ::/0

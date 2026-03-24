@@ -67,8 +67,8 @@ func TestNew(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			desc: "empty config (should use defaults)",
-			cfg: &Config{},
+			desc:    "empty config (should use defaults)",
+			cfg:     &Config{},
 			wantErr: false,
 		},
 		{
@@ -86,6 +86,14 @@ func TestNew(t *testing.T) {
 				Header:             "X-Forwarded-For",
 			},
 			wantErr: false,
+		},
+		{
+			desc: "invalid cloudflareRangesHTTPTimeout",
+			cfg: &Config{
+				TrustedProxyRanges:          []string{"173.245.48.0/20"},
+				CloudflareRangesHTTPTimeout: "not-a-duration",
+			},
+			wantErr: true,
 		},
 	}
 
@@ -115,23 +123,56 @@ func TestNew(t *testing.T) {
 
 func TestMiddleware_ServeHTTP(t *testing.T) {
 	tests := []struct {
-		desc              string
-		cfg               *Config
-		remoteAddr        string
-		initialXFF        string
-		expectedXFF       string
-		expectedStatus    int
-		shouldPreserveXFF bool
+		desc                string
+		cfg                 *Config
+		remoteAddr          string
+		initialXFF          string
+		initialRealIP       string
+		cfConnectingIP      string
+		expectedXFF         string
+		expectedRealIP      string
+		expectedStatus      int
+		shouldPreserveXFF   bool
+		spoofOnLegacyHeader string // set this header name to initialXFF when testing legacy spoof path
 	}{
 		{
-			desc: "trusted proxy - preserve XFF",
+			desc: "trusted proxy - normalizes to first XFF when no CF-Connecting-IP",
 			cfg: &Config{
 				TrustedProxyRanges: []string{"173.245.48.0/20"},
 				Header:             "X-Forwarded-For",
 			},
 			remoteAddr:        "173.245.48.1:12345",
-			initialXFF:        "192.168.1.100",
-			expectedXFF:       "192.168.1.100", // Should be preserved
+			initialXFF:        "203.0.113.1, 192.0.2.1",
+			expectedXFF:       "203.0.113.1",
+			expectedRealIP:    "203.0.113.1",
+			expectedStatus:    http.StatusOK,
+			shouldPreserveXFF: false,
+		},
+		{
+			desc: "trusted proxy - CF-Connecting-IP wins over XFF",
+			cfg: &Config{
+				TrustedProxyRanges: []string{"173.245.48.0/20"},
+				Header:             "X-Forwarded-For",
+			},
+			remoteAddr:        "173.245.48.1:12345",
+			initialXFF:        "192.0.2.1, 192.0.2.2",
+			cfConnectingIP:    "203.0.113.50",
+			expectedXFF:       "203.0.113.50",
+			expectedRealIP:    "203.0.113.50",
+			expectedStatus:    http.StatusOK,
+			shouldPreserveXFF: false,
+		},
+		{
+			desc: "trusted preserveForwardedForWhenTrusted leaves headers unchanged",
+			cfg: &Config{
+				TrustedProxyRanges:              []string{"173.245.48.0/20"},
+				Header:                          "X-Forwarded-For",
+				PreserveForwardedForWhenTrusted: true,
+			},
+			remoteAddr:        "173.245.48.1:12345",
+			initialXFF:        "203.0.113.1, 192.0.2.1",
+			expectedXFF:       "203.0.113.1, 192.0.2.1",
+			expectedRealIP:    "",
 			expectedStatus:    http.StatusOK,
 			shouldPreserveXFF: true,
 		},
@@ -143,7 +184,8 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			},
 			remoteAddr:        "192.168.1.100:12345",
 			initialXFF:        "10.0.0.1",
-			expectedXFF:       "192.168.1.100", // Should be overridden
+			expectedXFF:       "192.168.1.100",
+			expectedRealIP:    "192.168.1.100",
 			expectedStatus:    http.StatusOK,
 			shouldPreserveXFF: false,
 		},
@@ -155,33 +197,37 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			},
 			remoteAddr:        "192.168.1.100:12345",
 			initialXFF:        "",
-			expectedXFF:       "192.168.1.100", // Should be set
+			expectedXFF:       "192.168.1.100",
+			expectedRealIP:    "192.168.1.100",
 			expectedStatus:    http.StatusOK,
 			shouldPreserveXFF: false,
 		},
 		{
-			desc: "custom header",
+			desc: "custom legacy header also set when not XFF or Real-IP",
 			cfg: &Config{
 				TrustedProxyRanges: []string{"173.245.48.0/20"},
-				Header:             "X-Real-IP",
+				Header:             "True-Client-IP",
 			},
-			remoteAddr:        "192.168.1.100:12345",
-			initialXFF:        "10.0.0.1",
-			expectedXFF:       "192.168.1.100",
-			expectedStatus:    http.StatusOK,
-			shouldPreserveXFF: false,
+			remoteAddr:          "192.168.1.100:12345",
+			initialXFF:          "10.0.0.1",
+			spoofOnLegacyHeader: "True-Client-IP",
+			expectedXFF:         "192.168.1.100",
+			expectedRealIP:      "192.168.1.100",
+			expectedStatus:      http.StatusOK,
+			shouldPreserveXFF:   false,
 		},
 		{
-			desc: "IPv6 trusted proxy",
+			desc: "IPv6 trusted proxy normalizes from XFF",
 			cfg: &Config{
 				TrustedProxyRanges: []string{"2400:cb00::/32"},
 				Header:             "X-Forwarded-For",
 			},
 			remoteAddr:        "[2400:cb00::1]:12345",
 			initialXFF:        "192.168.1.100",
-			expectedXFF:       "192.168.1.100", // Should be preserved
+			expectedXFF:       "192.168.1.100",
+			expectedRealIP:    "192.168.1.100",
 			expectedStatus:    http.StatusOK,
-			shouldPreserveXFF: true,
+			shouldPreserveXFF: false,
 		},
 		{
 			desc: "IPv6 untrusted proxy",
@@ -191,21 +237,23 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			},
 			remoteAddr:        "[2001:db8::1]:12345",
 			initialXFF:        "10.0.0.1",
-			expectedXFF:       "2001:db8::1", // Should be overridden
+			expectedXFF:       "2001:db8::1",
+			expectedRealIP:    "2001:db8::1",
 			expectedStatus:    http.StatusOK,
 			shouldPreserveXFF: false,
 		},
 		{
-			desc: "single IP trusted proxy",
+			desc: "single IP trusted proxy normalizes",
 			cfg: &Config{
 				TrustedProxyRanges: []string{"173.245.48.1"},
 				Header:             "X-Forwarded-For",
 			},
 			remoteAddr:        "173.245.48.1:12345",
 			initialXFF:        "192.168.1.100",
-			expectedXFF:       "192.168.1.100", // Should be preserved
+			expectedXFF:       "192.168.1.100",
+			expectedRealIP:    "192.168.1.100",
 			expectedStatus:    http.StatusOK,
-			shouldPreserveXFF: true,
+			shouldPreserveXFF: false,
 		},
 		{
 			desc: "empty trusted proxy ranges - treat all as untrusted",
@@ -215,9 +263,24 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			},
 			remoteAddr:        "173.245.48.1:12345",
 			initialXFF:        "192.168.1.100",
-			expectedXFF:       "173.245.48.1", // Should be overridden
+			expectedXFF:       "173.245.48.1",
+			expectedRealIP:    "173.245.48.1",
 			expectedStatus:    http.StatusOK,
 			shouldPreserveXFF: false,
+		},
+		{
+			desc: "trusted cannot resolve client - pass through",
+			cfg: &Config{
+				TrustedProxyRanges: []string{"173.245.48.0/20"},
+				Header:             "X-Forwarded-For",
+			},
+			remoteAddr:        "173.245.48.1:12345",
+			initialXFF:        "",
+			cfConnectingIP:    "not-an-ip",
+			expectedXFF:       "",
+			expectedRealIP:    "",
+			expectedStatus:    http.StatusOK,
+			shouldPreserveXFF: true,
 		},
 	}
 
@@ -240,7 +303,17 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			req := httptest.NewRequest("GET", "/", nil)
 			req.RemoteAddr = test.remoteAddr
 			if test.initialXFF != "" {
-				req.Header.Set(test.cfg.Header, test.initialXFF)
+				if test.spoofOnLegacyHeader != "" {
+					req.Header.Set(test.spoofOnLegacyHeader, test.initialXFF)
+				} else {
+					req.Header.Set(headerForwardedFor, test.initialXFF)
+				}
+			}
+			if test.initialRealIP != "" {
+				req.Header.Set(headerRealIP, test.initialRealIP)
+			}
+			if test.cfConnectingIP != "" {
+				req.Header.Set(headerCFConnectingIP, test.cfConnectingIP)
 			}
 
 			// Create response recorder
@@ -254,15 +327,26 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 				t.Errorf("handler returned wrong status code: got %v want %v", status, test.expectedStatus)
 			}
 
-			// Check XFF header
-			actualXFF := recordedReq.Header.Get(test.cfg.Header)
+			actualXFF := recordedReq.Header.Get(headerForwardedFor)
 			if actualXFF != test.expectedXFF {
-				t.Errorf("XFF header mismatch: got %v want %v", actualXFF, test.expectedXFF)
+				t.Errorf("X-Forwarded-For mismatch: got %q want %q", actualXFF, test.expectedXFF)
+			}
+			actualRealIP := recordedReq.Header.Get(headerRealIP)
+			if test.expectedRealIP != "" && actualRealIP != test.expectedRealIP {
+				t.Errorf("X-Real-IP mismatch: got %q want %q", actualRealIP, test.expectedRealIP)
+			}
+			if test.cfg.Header == "True-Client-IP" {
+				if got := recordedReq.Header.Get("True-Client-IP"); got != test.expectedXFF {
+					t.Errorf("True-Client-IP mismatch: got %q want %q", got, test.expectedXFF)
+				}
 			}
 
 			// Additional check for preservation behavior
-			if test.shouldPreserveXFF && actualXFF != test.initialXFF {
-				t.Errorf("XFF should have been preserved but was changed: original %v, got %v", test.initialXFF, actualXFF)
+			if test.shouldPreserveXFF && test.initialXFF != "" {
+				wantXFF := test.initialXFF
+				if actualXFF != wantXFF {
+					t.Errorf("XFF should have been preserved but was changed: original %v, got %v", wantXFF, actualXFF)
+				}
 			}
 		})
 	}
@@ -370,7 +454,7 @@ func TestClientIP(t *testing.T) {
 		{"173.245.48.1:80", "173.245.48.1"},
 		{"[2001:db8::1]:12345", "2001:db8::1"}, // IPv6 with port needs brackets
 		{"192.168.1.100", "192.168.1.100"},     // No port
-		{"invalid", "<nil>"},                    // Invalid format returns nil
+		{"invalid", "<nil>"},                   // Invalid format returns nil
 	}
 
 	for _, test := range tests {
@@ -423,13 +507,130 @@ func TestIsTrustedProxy(t *testing.T) {
 	}
 }
 
+func TestIsTrustedProxy_nilIP(t *testing.T) {
+	m := &middleware{trustedProxies: []*net.IPNet{{IP: net.IPv4(173, 245, 48, 0), Mask: net.CIDRMask(20, 32)}}}
+	if m.isTrustedProxy(nil) {
+		t.Fatal("expected false for nil IP")
+	}
+}
+
+func TestMergeUniqueCIDRStrings(t *testing.T) {
+	got := mergeUniqueCIDRStrings([]string{"10.0.0.0/8", " 10.0.0.0/8 "}, []string{"192.168.0.0/16"})
+	if len(got) != 2 {
+		t.Fatalf("want 2 entries, got %v", got)
+	}
+}
+
+func TestNew_fetchCloudflareRanges_merge(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"result":{"ipv4_cidrs":["198.51.100.0/24"],"ipv6_cidrs":[]},"success":true}`))
+	}))
+	defer srv.Close()
+
+	old := cloudflareIPsAPIURL
+	cloudflareIPsAPIURL = srv.URL
+	defer func() { cloudflareIPsAPIURL = old }()
+
+	cfg := &Config{
+		FetchCloudflareRanges:       true,
+		TrustedProxyRanges:          []string{"10.0.0.0/8"},
+		CloudflareRangesHTTPTimeout: "2s",
+	}
+
+	t.Run("fetchedCIDR", func(t *testing.T) {
+		var recorded *http.Request
+		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { recorded = r })
+		h, err := New(context.Background(), inner, cfg, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "198.51.100.1:9999"
+		req.Header.Set(headerCFConnectingIP, "203.0.113.1")
+		h.ServeHTTP(httptest.NewRecorder(), req)
+		if got := recorded.Header.Get(headerForwardedFor); got != "203.0.113.1" {
+			t.Errorf("X-Forwarded-For got %q want 203.0.113.1", got)
+		}
+	})
+
+	t.Run("manualCIDR", func(t *testing.T) {
+		var recorded *http.Request
+		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { recorded = r })
+		h, err := New(context.Background(), inner, cfg, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "10.5.5.5:9999"
+		req.Header.Set(headerForwardedFor, "198.51.100.99")
+		h.ServeHTTP(httptest.NewRecorder(), req)
+		if got := recorded.Header.Get(headerForwardedFor); got != "198.51.100.99" {
+			t.Errorf("X-Forwarded-For got %q want 198.51.100.99", got)
+		}
+	})
+}
+
+func TestNew_fetchCloudflareRanges_strictFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	old := cloudflareIPsAPIURL
+	cloudflareIPsAPIURL = srv.URL
+	defer func() { cloudflareIPsAPIURL = old }()
+
+	cfg := &Config{
+		FetchCloudflareRanges:         true,
+		CloudflareRangesFetchRequired: true,
+		CloudflareRangesHTTPTimeout:   "2s",
+		TrustedProxyRanges:            nil,
+	}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	_, err := New(context.Background(), next, cfg, "test")
+	if err == nil {
+		t.Fatal("expected error when fetch required and API fails")
+	}
+}
+
+func TestNew_fetchCloudflareRanges_fallbackEmbedded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	old := cloudflareIPsAPIURL
+	cloudflareIPsAPIURL = srv.URL
+	defer func() { cloudflareIPsAPIURL = old }()
+
+	cfg := &Config{
+		FetchCloudflareRanges:       true,
+		CloudflareRangesHTTPTimeout: "2s",
+		TrustedProxyRanges:          nil,
+	}
+	var recorded *http.Request
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { recorded = r })
+	h, err := New(context.Background(), inner, cfg, "test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "173.245.48.1:12345"
+	req.Header.Set(headerCFConnectingIP, "198.51.100.77")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if got := recorded.Header.Get(headerForwardedFor); got != "198.51.100.77" {
+		t.Errorf("embedded fallback trust: XFF got %q", got)
+	}
+}
+
 func TestIntegration_CloudflareExample(t *testing.T) {
 	// Test the complete Cloudflare example from the documentation
 	cfg := &Config{
 		TrustedProxyRanges: []string{
-			"173.245.48.0/20",   // Cloudflare IPv4
-			"103.21.244.0/22",   // Cloudflare IPv4
-			"2400:cb00::/32",    // Cloudflare IPv6
+			"173.245.48.0/20", // Cloudflare IPv4
+			"103.21.244.0/22", // Cloudflare IPv4
+			"2400:cb00::/32",  // Cloudflare IPv6
 		},
 		DirectRanges: []string{"0.0.0.0/0"}, // allow any non-Cloudflare source
 		Header:       "X-Forwarded-For",
@@ -444,30 +645,35 @@ func TestIntegration_CloudflareExample(t *testing.T) {
 		t.Fatalf("Failed to create middleware: %v", err)
 	}
 
-	// Test cases based on the Cloudflare example
 	testCases := []struct {
-		desc        string
-		remoteAddr  string
-		initialXFF  string
-		expectedXFF string
+		desc           string
+		remoteAddr     string
+		initialXFF     string
+		cfConnectingIP string
+		expectedXFF    string
+		expectedRealIP string
 	}{
 		{
-			desc:        "Cloudflare proxy - preserve XFF",
-			remoteAddr:  "173.245.48.1:12345",
-			initialXFF:  "192.168.1.100",
-			expectedXFF: "192.168.1.100", // Should be preserved
+			desc:           "Cloudflare proxy - normalize from CF-Connecting-IP",
+			remoteAddr:     "173.245.48.1:12345",
+			initialXFF:     "192.0.2.1, 192.0.2.2",
+			cfConnectingIP: "192.168.1.100",
+			expectedXFF:    "192.168.1.100",
+			expectedRealIP: "192.168.1.100",
 		},
 		{
-			desc:        "Direct client - set XFF to remote",
-			remoteAddr:  "192.168.1.100:12345",
-			initialXFF:  "10.0.0.1",
-			expectedXFF: "192.168.1.100", // Should be overridden
+			desc:           "Direct client - set XFF to remote",
+			remoteAddr:     "192.168.1.100:12345",
+			initialXFF:     "10.0.0.1",
+			expectedXFF:    "192.168.1.100",
+			expectedRealIP: "192.168.1.100",
 		},
 		{
-			desc:        "Direct client with empty XFF",
-			remoteAddr:  "192.168.1.100:12345",
-			initialXFF:  "",
-			expectedXFF: "192.168.1.100", // Should be set
+			desc:           "Direct client with empty XFF",
+			remoteAddr:     "192.168.1.100:12345",
+			initialXFF:     "",
+			expectedXFF:    "192.168.1.100",
+			expectedRealIP: "192.168.1.100",
 		},
 	}
 
@@ -476,16 +682,24 @@ func TestIntegration_CloudflareExample(t *testing.T) {
 			req := httptest.NewRequest("GET", "/", nil)
 			req.RemoteAddr = tc.remoteAddr
 			if tc.initialXFF != "" {
-				req.Header.Set("X-Forwarded-For", tc.initialXFF)
+				req.Header.Set(headerForwardedFor, tc.initialXFF)
+			}
+			if tc.cfConnectingIP != "" {
+				req.Header.Set(headerCFConnectingIP, tc.cfConnectingIP)
 			}
 
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)
 
-			actualXFF := req.Header.Get("X-Forwarded-For")
+			actualXFF := req.Header.Get(headerForwardedFor)
 			if actualXFF != tc.expectedXFF {
 				t.Errorf("XFF header mismatch: got %v want %v", actualXFF, tc.expectedXFF)
 			}
+			if tc.expectedRealIP != "" {
+				if got := req.Header.Get(headerRealIP); got != tc.expectedRealIP {
+					t.Errorf("X-Real-IP mismatch: got %v want %v", got, tc.expectedRealIP)
+				}
+			}
 		})
 	}
-} 
+}

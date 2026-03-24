@@ -1,60 +1,63 @@
 # Cloudflare Real-Client-IP Middleware
 
-A Traefik middleware plugin that securely handles X-Forwarded-For headers when using Cloudflare as a reverse proxy. This plugin prevents IP spoofing attacks while ensuring proper IP detection for downstream middlewares like `ipAllowList`.
+A Traefik middleware plugin that securely derives the **real client IP** when Cloudflare (or another trusted reverse proxy) sits in front of Traefik, or when clients connect directly. It prevents header spoofing and aligns **`X-Forwarded-For`** and **`X-Real-IP`** so downstream middlewares such as `ipAllowList` see one consistent address.
 
 ## What Problem Does This Solve?
 
-When using Cloudflare as a reverse proxy in front of Traefik, you face a common security challenge:
-
-1. **IP Spoofing Risk**: Malicious clients can forge `X-Forwarded-For` headers to appear to come from trusted IPs
-2. **Incorrect IP Detection**: Downstream middlewares like `ipAllowList` may block legitimate traffic or allow malicious traffic
-3. **Security Middleware Failures**: IP-based security rules become unreliable when headers can be spoofed
-
-This plugin implements a secure model that:
-
-- **Trusts only Cloudflare IPs** to set `X-Forwarded-For` headers
-- **Overwrites spoofed headers** with the actual remote IP for untrusted sources
-- **Ensures downstream middlewares** receive accurate client IP information
+1. **IP spoofing**: Untrusted clients cannot forge forwarded headers; only peers in your trusted CIDRs are allowed to supply them.
+2. **Wrong “real IP” behind Cloudflare**: Traefik may otherwise treat the last proxy hop as the client. This plugin prefers **`CF-Connecting-IP`** when the TCP peer is a trusted Cloudflare (or other) proxy.
+3. **`ipAllowList` / `depth: 1`**: After normalization, the first (and only) `X-Forwarded-For` value is the intended client IP for allow/deny rules.
 
 ## How It Works
 
-The plugin follows a simple but effective security model:
+**Trusted peer** (`RemoteAddr` is inside the merged trusted CIDR list):
 
-1. **Trusted Proxy Check**: If the request comes from a Cloudflare IP range, leave `X-Forwarded-For` untouched
-2. **Untrusted Source Handling**: For all other sources, override `X-Forwarded-For` with the immediate remote address
-3. **Header Injection**: If `X-Forwarded-For` is empty and the remote isn't trusted, inject the remote address
+1. Resolve client IP: valid **`CF-Connecting-IP`** first, else the **leftmost** parseable IP in **`X-Forwarded-For`**.
+2. If a client IP was resolved, set **`X-Forwarded-For`** and **`X-Real-IP`** to that value (single hop).
+3. If nothing could be resolved, headers are not modified.
 
-This prevents header spoofing while ensuring downstream middlewares always have accurate client IP information to work with.
+**Untrusted peer**: set **`X-Forwarded-For`** and **`X-Real-IP`** to the TCP client address (anti-spoofing).
+
+**Trusted CIDR list** is built from:
+
+- **`trustedProxyRanges`** (always merged in), plus
+- If **`fetchCloudflareRanges: true`**, the IPv4/IPv6 CIDRs from Cloudflare’s public API (`https://api.cloudflare.com/client/v4/ips`).
+
+If the fetch fails and **`cloudflareRangesFetchRequired`** is `false` (default), a warning is logged and an **embedded** snapshot of Cloudflare ranges is used so Traefik still starts. If fetch is **required**, initialization fails instead.
+
+## Upgrading from v1.x
+
+v2 **normalizes** headers for trusted proxies by default. For the old behavior (leave `X-Forwarded-For` unchanged when the peer is trusted), set:
+
+```yaml
+preserveForwardedForWhenTrusted: true
+```
+
+See [CHANGELOG.md](CHANGELOG.md) for details.
 
 ## Installation
 
 ### Building the Plugin
 
 ```bash
-# Clone the repository
 git clone https://github.com/danielbjornadal/traefik-cloudflare-plugin.git
 cd traefik-cloudflare-plugin
-
-# Build the plugin
 go build -buildmode=plugin -o traefik_cloudflare_plugin.so
 ```
 
-### Traefik Configuration
-
-Add the plugin to your Traefik configuration:
+### Traefik static config
 
 ```yaml
-# traefik.yml or dynamic configuration
 experimental:
   plugins:
     traefik_cloudflare_plugin:
       moduleName: github.com/danielbjornadal/traefik-cloudflare-plugin
-      version: v1.0.2
+      version: v2.0.0
 ```
 
 ## Configuration
 
-### Basic Configuration
+### Recommended: fetch Cloudflare ranges + extra CIDRs
 
 ```yaml
 apiVersion: traefik.io/v1alpha1
@@ -64,62 +67,33 @@ metadata:
 spec:
   plugin:
     traefik_cloudflare_plugin:
+      fetchCloudflareRanges: true
+      cloudflareRangesHTTPTimeout: 5s
       trustedProxyRanges:
-        - 173.245.48.0/20 # Cloudflare IPv4
-        - 103.21.244.0/22 # Cloudflare IPv4
-        - 103.22.200.0/22 # Cloudflare IPv4
-        - 103.31.4.0/22 # Cloudflare IPv4
-        - 141.101.64.0/18 # Cloudflare IPv4
-        - 108.162.192.0/18 # Cloudflare IPv4
-        - 190.93.240.0/20 # Cloudflare IPv4
-        - 188.114.96.0/20 # Cloudflare IPv4
-        - 197.234.240.0/22 # Cloudflare IPv4
-        - 198.41.128.0/17 # Cloudflare IPv4
-        - 162.158.0.0/15 # Cloudflare IPv4
-        - 104.16.0.0/13 # Cloudflare IPv4
-        - 104.24.0.0/14 # Cloudflare IPv4
-        - 172.64.0.0/13 # Cloudflare IPv4
-        - 131.0.72.0/22 # Cloudflare IPv4
-        - 2400:cb00::/32 # Cloudflare IPv6
-        - 2606:4700::/32 # Cloudflare IPv6
-        - 2803:f800::/32 # Cloudflare IPv6
-        - 2405:b500::/32 # Cloudflare IPv6
-        - 2405:8100::/32 # Cloudflare IPv6
-        - 2a06:98c0::/29 # Cloudflare IPv6
-        - 2c0f:f248::/32 # Cloudflare IPv6
+        - 193.53.88.88/29
       directRanges:
-        - 0.0.0.0/0 # Allow any non-Cloudflare source to be treated as direct
+        - 0.0.0.0/0
+        - ::/0
       header: X-Forwarded-For
 ```
 
-### Advanced Configuration
+- **`trustedProxyRanges`**: extra trusted proxies (load balancers, corporate ingress, etc.) **in addition** to Cloudflare when fetch is enabled.
+- **`cloudflareRangesFetchRequired: true`**: fail plugin init if the Cloudflare API cannot be read (no embedded fallback for that path).
+- **`preserveForwardedForWhenTrusted: true`**: v1-compatible trusted path (no normalization).
 
-You can customize which IP ranges are treated as direct connections:
+### Fully static list (no HTTP fetch)
 
-```yaml
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: traefik-cloudflare-plugin
-spec:
-  plugin:
-    traefik_cloudflare_plugin:
-      trustedProxyRanges:
-        - 173.245.48.0/20 # Cloudflare IPv4
-        - 103.21.244.0/22 # Cloudflare IPv4
-        # ... other Cloudflare ranges
-      directRanges:
-        - 10.0.0.0/8 # Your internal network
-        - 192.168.0.0/16 # Your internal network
-        - 172.16.0.0/12 # Your internal network
-      header: X-Forwarded-For # Optional, defaults to X-Forwarded-For
-```
+Same as before: set **`fetchCloudflareRanges: false`** (or omit it) and list all CIDRs under **`trustedProxyRanges`**.
+
+### Legacy `header` field
+
+If **`header`** is set to something other than `X-Forwarded-For` or `X-Real-IP`, that header is **also** set to the resolved client IP when normalizing.
+
+**Note:** **`directRanges`** is accepted for compatibility but is not used at runtime yet.
 
 ## Usage
 
-### Router Configuration
-
-Attach the middleware **before** your `ipAllowList` middleware:
+Attach this middleware **before** `ipAllowList`:
 
 ```yaml
 apiVersion: traefik.containo.us/v1alpha1
@@ -136,13 +110,13 @@ spec:
         - name: myapp
           port: 80
       middlewares:
-        - name: traefik-cloudflare-plugin # Order matters!
+        - name: traefik-cloudflare-plugin
         - name: allowlist
 ```
 
-### With IP Allow List
+### With IP allow list
 
-Now your `ipAllowList` can safely use `ipStrategy.depth: 1`:
+Use **`ipStrategy.depth: 1`**; the first `X-Forwarded-For` entry is the normalized client IP.
 
 ```yaml
 apiVersion: traefik.io/v1alpha1
@@ -152,25 +126,22 @@ metadata:
 spec:
   ipAllowList:
     ipStrategy:
-      depth: 1 # Safe to use depth 1 after traefik_cloudflare_plugin
+      depth: 1
     sourceRange:
       - 10.0.0.0/8
       - 192.168.0.0/16
 ```
 
-## Security Benefits
+## Security notes
 
-1. **Prevents IP Spoofing**: Malicious clients cannot forge `X-Forwarded-For` headers
-2. **Accurate IP Detection**: Downstream middlewares receive the real client IP
-3. **Trusted Proxy Support**: Legitimate Cloudflare traffic is preserved
-4. **No External Dependencies**: Uses only Go standard library for CIDR parsing
+1. **`CF-Connecting-IP` / `X-Forwarded-For` are only trusted when `RemoteAddr` is in your trusted CIDRs.**
+2. Keep trusted ranges accurate; overly wide lists weaken spoofing protection.
+3. Optional fetch uses the Go standard library HTTP client only (no extra modules).
 
-## Cloudflare IP Ranges
+## Cloudflare IP ranges
 
-The plugin includes all current Cloudflare IP ranges. You can find the latest ranges at:
-
-- [Cloudflare IPv4 Ranges](https://www.cloudflare.com/ips-v4)
-- [Cloudflare IPv6 Ranges](https://www.cloudflare.com/ips-v6)
+- API used when **`fetchCloudflareRanges: true`**: [Cloudflare API /ips](https://api.cloudflare.com/client/v4/ips)
+- Human-readable lists: [IPv4](https://www.cloudflare.com/ips-v4), [IPv6](https://www.cloudflare.com/ips-v6)
 
 ## License
 
@@ -178,8 +149,8 @@ Released under MIT License.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome. Please open a Pull Request.
 
 ## Inspiration
 
-This plugin is inspired by Traefik's demo plugin pattern. See [Traefik Plugin Documentation](https://plugins.traefik.io/plugins/628c9ee2108ecc83915d7764/demo-plugin) for more information.
+Inspired by Traefik’s demo plugin pattern. See [Traefik Plugin Documentation](https://plugins.traefik.io/plugins/628c9ee2108ecc83915d7764/demo-plugin).
