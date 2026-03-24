@@ -70,7 +70,7 @@ spec:
       fetchCloudflareRanges: true
       cloudflareRangesHTTPTimeout: 5s
       trustedProxyRanges:
-        - 193.53.88.88/29
+        - 198.51.100.0/29
       directRanges:
         - 0.0.0.0/0
         - ::/0
@@ -150,11 +150,50 @@ Anyone who can open a TCP connection **from** an address inside your trusted lis
 
 **Risky:** `trustedProxyRanges: [0.0.0.0/0, ::/0]` (or an enormous corporate supernet attackers can reach) makes **every** client “trusted,” so forged `CF-Connecting-IP` / leftmost `X-Forwarded-For` can impersonate any IP and **bypass an allowlist** that uses the normalized headers.
 
-**Better:** Cloudflare’s published ranges (via **`fetchCloudflareRanges`** or a static list) plus **only** the CIDRs of **your** load balancers or ingress that legitimately terminate in front of Traefik (for example `193.53.88.88/29`).
+**Better:** Cloudflare’s published ranges (via **`fetchCloudflareRanges`** or a static list) plus **only** the CIDRs of **your** load balancers or ingress that legitimately terminate in front of Traefik (for example a small VIP range like `198.51.100.0/29`).
 
 ### 3. Optional fetch and dependencies
 
 When **`fetchCloudflareRanges: true`**, the plugin calls Cloudflare’s public API **once at middleware init** using Go’s **`net/http`** only—no extra Go modules. That request does not run per request; it only builds the trusted CIDR list at startup (or on dynamic reload, depending on Traefik).
+
+## FAQ
+
+### Do I still need Traefik `forwardedHeaders.trustedIPs` if I use this plugin?
+
+**Yes.** They are not obsolete.
+
+| Mechanism | Role |
+|-----------|------|
+| **Entrypoint `forwardedHeaders.trustedIPs`** (e.g. on `websecure`) | Traefik’s **own** HTTP layer: when the **TCP peer** is in this list, Traefik may trust incoming `X-Forwarded-For` / `X-Real-IP` / `Forwarded` for **access logs**, built-in client detection, and how it handles those headers in the pipeline. |
+| **This plugin’s `trustedProxyRanges`** (+ optional `fetchCloudflareRanges`) | Your middleware: decides whether `CF-Connecting-IP` / `X-Forwarded-For` may set the **normalized** client IP for **`ipAllowList`** and backends. |
+
+The plugin does **not** reconfigure the entrypoint. Keep **`trustedIPs`** and the plugin’s trusted list **aligned** with the same real topology so Traefik core and your allowlists agree on who is a proxy.
+
+**Ideally they should list the same kind of addresses** (see below)—not identical YAML if one side uses fetch and the other is static, but the **meaning** should match.
+
+### What should “trusted proxy” CIDRs contain?
+
+These lists answer: *“Which **source IPs** (as seen by Traefik on the socket) belong to **infrastructure that is allowed to speak for the real client** via headers?”*
+
+**Include:**
+
+1. **Cloudflare** – All published egress ranges if traffic is **Client → Cloudflare → Traefik**. Use Cloudflare’s official lists or enable **`fetchCloudflareRanges`** in the plugin and mirror the same ranges in **`trustedIPs`** (static or generated).
+2. **Your own reverse proxies / load balancers** – The CIDR(s) or single IPs from which **your** LB, ingress controller, or corporate proxy connects **to Traefik** (VIP subnet, node subnet as seen by the pod, health-check sources if they forward traffic—only if they actually proxy and set headers correctly).
+
+Example (documentation-only range, not a real network): if your public LB always appears as `198.51.100.0/29` to Traefik pods, add that **in addition** to Cloudflare ranges.
+
+**Do not include:**
+
+1. **End-user / “local client” ranges** – Visitor home IPs, mobile networks, or “everyone in our company” are **not** trusted proxies. Putting huge public or RFC1918 ranges here because “our users are internal” makes **anyone** who can reach Traefik from those addresses able to **forge** `CF-Connecting-IP` / `X-Forwarded-For` and **bypass** an `ipAllowList` that trusts the normalized headers.
+2. **`0.0.0.0/0` or `::/0`** – Never as “trusted proxy” unless you intend **every** TCP client to be treated as a trusted header source (effectively disabling spoofing protection).
+3. **Arbitrary RFC1918 supernets** (e.g. all of `10.0.0.0/8`) – Only if **every** address in that range can **only** reach Traefik through **controlled** proxies you list separately; otherwise you widen who can spoof headers.
+
+**Where “allowed clients” go:** Restrict **who may access the app** with **`ipAllowList`** (or similar) using **`sourceRange`** on the **normalized** client IP—**after** this middleware. That is separate from “who is a proxy.”
+
+### Quick checklist
+
+- **Trusted proxy lists** (Traefik `trustedIPs` + plugin `trustedProxyRanges` / fetch): Cloudflare (if used) + **narrow** CIDRs for **your** L7/L4 front ends.
+- **Allowlist / denylist** (`ipAllowList`, firewalls, app logic): **Real client** IPs or networks you want to permit or block **after** normalization.
 
 ## Cloudflare IP ranges
 

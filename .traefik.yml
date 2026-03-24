@@ -10,7 +10,7 @@ testData:
   fetchCloudflareRanges: true
   cloudflareRangesHTTPTimeout: 5s
   trustedProxyRanges:
-    - 193.53.88.88/29
+    - 198.51.100.0/29
   directRanges:
     - 0.0.0.0/0
     - ::/0
