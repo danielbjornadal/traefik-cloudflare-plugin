@@ -52,7 +52,7 @@ experimental:
   plugins:
     traefik_cloudflare_plugin:
       moduleName: github.com/danielbjornadal/traefik-cloudflare-plugin
-      version: v2.0.0
+      version: v1.1.0
 ```
 
 ## Configuration
@@ -162,10 +162,10 @@ When **`fetchCloudflareRanges: true`**, the plugin calls Cloudflare’s public A
 
 **Yes.** They are not obsolete.
 
-| Mechanism | Role |
-|-----------|------|
-| **Entrypoint `forwardedHeaders.trustedIPs`** (e.g. on `websecure`) | Traefik’s **own** HTTP layer: when the **TCP peer** is in this list, Traefik may trust incoming `X-Forwarded-For` / `X-Real-IP` / `Forwarded` for **access logs**, built-in client detection, and how it handles those headers in the pipeline. |
-| **This plugin’s `trustedProxyRanges`** (+ optional `fetchCloudflareRanges`) | Your middleware: decides whether `CF-Connecting-IP` / `X-Forwarded-For` may set the **normalized** client IP for **`ipAllowList`** and backends. |
+| Mechanism                                                                   | Role                                                                                                                                                                                                                                            |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Entrypoint `forwardedHeaders.trustedIPs`** (e.g. on `websecure`)          | Traefik’s **own** HTTP layer: when the **TCP peer** is in this list, Traefik may trust incoming `X-Forwarded-For` / `X-Real-IP` / `Forwarded` for **access logs**, built-in client detection, and how it handles those headers in the pipeline. |
+| **This plugin’s `trustedProxyRanges`** (+ optional `fetchCloudflareRanges`) | Your middleware: decides whether `CF-Connecting-IP` / `X-Forwarded-For` may set the **normalized** client IP for **`ipAllowList`** and backends.                                                                                                |
 
 The plugin does **not** reconfigure the entrypoint. Keep **`trustedIPs`** and the plugin’s trusted list **aligned** with the same real topology so Traefik core and your allowlists agree on who is a proxy.
 
@@ -173,7 +173,7 @@ The plugin does **not** reconfigure the entrypoint. Keep **`trustedIPs`** and th
 
 ### What should “trusted proxy” CIDRs contain?
 
-These lists answer: *“Which **source IPs** (as seen by Traefik on the socket) belong to **infrastructure that is allowed to speak for the real client** via headers?”*
+These lists answer: _“Which **source IPs** (as seen by Traefik on the socket) belong to **infrastructure that is allowed to speak for the real client** via headers?”_
 
 **Include:**
 
