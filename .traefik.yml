@@ -11,7 +11,4 @@ testData:
   cloudflareRangesHTTPTimeout: 5s
   trustedProxyRanges:
     - 198.51.100.0/29
-  directRanges:
-    - 0.0.0.0/0
-    - ::/0
   header: "X-Forwarded-For"

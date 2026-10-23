@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -136,15 +137,15 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 		spoofOnLegacyHeader string // set this header name to initialXFF when testing legacy spoof path
 	}{
 		{
-			desc: "trusted proxy - normalizes to first XFF when no CF-Connecting-IP",
+			desc: "trusted proxy - normalizes to rightmost untrusted XFF when no CF-Connecting-IP",
 			cfg: &Config{
 				TrustedProxyRanges: []string{"173.245.48.0/20"},
 				Header:             "X-Forwarded-For",
 			},
 			remoteAddr:        "173.245.48.1:12345",
 			initialXFF:        "203.0.113.1, 192.0.2.1",
-			expectedXFF:       "203.0.113.1",
-			expectedRealIP:    "203.0.113.1",
+			expectedXFF:       "192.0.2.1",
+			expectedRealIP:    "192.0.2.1",
 			expectedStatus:    http.StatusOK,
 			shouldPreserveXFF: false,
 		},
@@ -269,7 +270,7 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			shouldPreserveXFF: false,
 		},
 		{
-			desc: "trusted cannot resolve client - pass through",
+			desc: "trusted cannot resolve client - falls back to the peer",
 			cfg: &Config{
 				TrustedProxyRanges: []string{"173.245.48.0/20"},
 				Header:             "X-Forwarded-For",
@@ -277,10 +278,10 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			remoteAddr:        "173.245.48.1:12345",
 			initialXFF:        "",
 			cfConnectingIP:    "not-an-ip",
-			expectedXFF:       "",
-			expectedRealIP:    "",
+			expectedXFF:       "173.245.48.1",
+			expectedRealIP:    "173.245.48.1",
 			expectedStatus:    http.StatusOK,
-			shouldPreserveXFF: true,
+			shouldPreserveXFF: false,
 		},
 	}
 
@@ -527,10 +528,7 @@ func TestNew_fetchCloudflareRanges_merge(t *testing.T) {
 		_, _ = w.Write([]byte(`{"result":{"ipv4_cidrs":["198.51.100.0/24"],"ipv6_cidrs":[]},"success":true}`))
 	}))
 	defer srv.Close()
-
-	old := cloudflareIPsAPIURL
-	cloudflareIPsAPIURL = srv.URL
-	defer func() { cloudflareIPsAPIURL = old }()
+	useCloudflareAPI(t, srv.URL)
 
 	cfg := &Config{
 		FetchCloudflareRanges:       true,
@@ -576,10 +574,7 @@ func TestNew_fetchCloudflareRanges_strictFails(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
-
-	old := cloudflareIPsAPIURL
-	cloudflareIPsAPIURL = srv.URL
-	defer func() { cloudflareIPsAPIURL = old }()
+	useCloudflareAPI(t, srv.URL)
 
 	cfg := &Config{
 		FetchCloudflareRanges:         true,
@@ -599,10 +594,7 @@ func TestNew_fetchCloudflareRanges_fallbackEmbedded(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
-
-	old := cloudflareIPsAPIURL
-	cloudflareIPsAPIURL = srv.URL
-	defer func() { cloudflareIPsAPIURL = old }()
+	useCloudflareAPI(t, srv.URL)
 
 	cfg := &Config{
 		FetchCloudflareRanges:       true,
@@ -702,4 +694,389 @@ func TestIntegration_CloudflareExample(t *testing.T) {
 			}
 		})
 	}
+}
+
+// serveRequest sends one request through a middleware built from cfg and returns the headers the
+// next handler received.
+func serveRequest(t *testing.T, cfg *Config, remoteAddr string, headers http.Header) http.Header {
+	t.Helper()
+	var got http.Header
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+	})
+	h, err := New(context.Background(), next, cfg, "test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = remoteAddr
+	for name, values := range headers {
+		for _, v := range values {
+			req.Header.Add(name, v)
+		}
+	}
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if got == nil {
+		t.Fatal("next handler was not called")
+	}
+	return got
+}
+
+// assertHeaders checks every header in want; a nil value means the header must be absent.
+func assertHeaders(t *testing.T, got http.Header, want map[string][]string) {
+	t.Helper()
+	for name, values := range want {
+		gotValues := got.Values(name)
+		if strings.Join(gotValues, "|") != strings.Join(values, "|") || len(gotValues) != len(values) {
+			t.Errorf("%s: got %q want %q", name, gotValues, values)
+		}
+	}
+}
+
+func TestServeHTTP_securityRegressions(t *testing.T) {
+	trusted := []string{"173.245.48.0/20", "198.51.100.0/29"}
+	spoofed := http.Header{
+		headerForwardedFor:     {"10.0.0.5"},
+		headerRealIP:           {"10.0.0.5"},
+		headerCFConnectingIP:   {"10.0.0.5"},
+		headerCFConnectingIPv6: {"2001:db8::5"},
+		headerTrueClientIP:     {"10.0.0.5"},
+		headerForwarded:        {"for=10.0.0.5"},
+		"X-Client-IP":          {"10.0.0.5"},
+	}
+
+	tests := []struct {
+		desc       string
+		cfg        *Config
+		remoteAddr string
+		headers    http.Header
+		want       map[string][]string
+	}{
+		{
+			desc:       "CF-Connecting-IP from a non-Cloudflare trusted peer is replaced",
+			cfg:        &Config{TrustedProxyRanges: trusted},
+			remoteAddr: "198.51.100.2:443",
+			headers: http.Header{
+				headerCFConnectingIP:   {"10.0.0.5"},
+				headerCFConnectingIPv6: {"2001:db8::5"},
+				headerForwardedFor:     {"203.0.113.9"},
+			},
+			want: map[string][]string{
+				headerForwardedFor:     {"203.0.113.9"},
+				headerRealIP:           {"203.0.113.9"},
+				headerCFConnectingIP:   {"203.0.113.9"},
+				headerCFConnectingIPv6: nil,
+			},
+		},
+		{
+			desc:       "client-supplied leftmost XFF entry is ignored",
+			cfg:        &Config{TrustedProxyRanges: trusted},
+			remoteAddr: "198.51.100.2:443",
+			headers:    http.Header{headerForwardedFor: {"10.0.0.5, 203.0.113.9"}},
+			want: map[string][]string{
+				headerForwardedFor: {"203.0.113.9"},
+				headerRealIP:       {"203.0.113.9"},
+			},
+		},
+		{
+			desc:       "Cloudflare peer without CF-Connecting-IP uses rightmost untrusted XFF entry",
+			cfg:        &Config{TrustedProxyRanges: trusted},
+			remoteAddr: "173.245.48.10:443",
+			headers:    http.Header{headerForwardedFor: {"10.0.0.5,203.0.113.9"}},
+			want: map[string][]string{
+				headerForwardedFor: {"203.0.113.9"},
+				headerRealIP:       {"203.0.113.9"},
+			},
+		},
+		{
+			desc:       "separate XFF header lines are read together",
+			cfg:        &Config{TrustedProxyRanges: trusted},
+			remoteAddr: "198.51.100.2:443",
+			headers:    http.Header{headerForwardedFor: {"10.0.0.5", "203.0.113.9"}},
+			want: map[string][]string{
+				headerForwardedFor: {"203.0.113.9"},
+				headerRealIP:       {"203.0.113.9"},
+			},
+		},
+		{
+			desc:       "untrusted peer cannot pass Cloudflare or Forwarded headers",
+			cfg:        &Config{TrustedProxyRanges: trusted},
+			remoteAddr: "203.0.113.9:5555",
+			headers:    spoofed,
+			want: map[string][]string{
+				headerForwardedFor:     {"203.0.113.9"},
+				headerRealIP:           {"203.0.113.9"},
+				headerCFConnectingIP:   nil,
+				headerCFConnectingIPv6: nil,
+				headerTrueClientIP:     nil,
+				headerForwarded:        nil,
+			},
+		},
+		{
+			desc:       "trusted peer with unparseable XFF resolves to the peer",
+			cfg:        &Config{TrustedProxyRanges: trusted},
+			remoteAddr: "198.51.100.2:443",
+			headers: http.Header{
+				headerRealIP:       {"10.0.0.5"},
+				headerForwardedFor: {"unknown"},
+			},
+			want: map[string][]string{
+				headerForwardedFor: {"198.51.100.2"},
+				headerRealIP:       {"198.51.100.2"},
+			},
+		},
+		{
+			desc:       "unparseable RemoteAddr removes all client IP headers",
+			cfg:        &Config{TrustedProxyRanges: trusted, Header: "X-Client-IP"},
+			remoteAddr: "[fe80::1%eth0]:5555",
+			headers:    spoofed,
+			want: map[string][]string{
+				headerForwardedFor:     nil,
+				headerRealIP:           nil,
+				headerCFConnectingIP:   nil,
+				headerCFConnectingIPv6: nil,
+				headerTrueClientIP:     nil,
+				headerForwarded:        nil,
+				"X-Client-IP":          nil,
+			},
+		},
+		{
+			desc:       "Worker from a zone outside allowedWorkerZones resolves to the Cloudflare IP",
+			cfg:        &Config{TrustedProxyRanges: trusted, AllowedWorkerZones: []string{"example.com"}},
+			remoteAddr: "173.245.48.10:443",
+			headers: http.Header{
+				headerCFWorker:       {"attacker.net"},
+				headerCFConnectingIP: {"10.0.0.5"},
+			},
+			want: map[string][]string{
+				headerForwardedFor:   {"173.245.48.10"},
+				headerRealIP:         {"173.245.48.10"},
+				headerCFConnectingIP: {"173.245.48.10"},
+			},
+		},
+		{
+			desc:       "Worker from an allowed zone keeps CF-Connecting-IP (case-insensitive)",
+			cfg:        &Config{TrustedProxyRanges: trusted, AllowedWorkerZones: []string{"example.com"}},
+			remoteAddr: "173.245.48.10:443",
+			headers: http.Header{
+				headerCFWorker:       {" Example.COM "},
+				headerCFConnectingIP: {"10.0.0.5"},
+			},
+			want: map[string][]string{
+				headerForwardedFor: {"10.0.0.5"},
+				headerRealIP:       {"10.0.0.5"},
+			},
+		},
+		{
+			desc:       "allowedWorkerZones does not affect requests without CF-Worker",
+			cfg:        &Config{TrustedProxyRanges: trusted, AllowedWorkerZones: []string{"example.com"}},
+			remoteAddr: "173.245.48.10:443",
+			headers:    http.Header{headerCFConnectingIP: {"10.0.0.5"}},
+			want: map[string][]string{
+				headerForwardedFor: {"10.0.0.5"},
+				headerRealIP:       {"10.0.0.5"},
+			},
+		},
+		{
+			desc:       "CF-Worker is ignored when allowedWorkerZones is unset",
+			cfg:        &Config{TrustedProxyRanges: trusted},
+			remoteAddr: "173.245.48.10:443",
+			headers: http.Header{
+				headerCFWorker:       {"attacker.net"},
+				headerCFConnectingIP: {"10.0.0.5"},
+			},
+			want: map[string][]string{
+				headerForwardedFor: {"10.0.0.5"},
+				headerRealIP:       {"10.0.0.5"},
+			},
+		},
+		{
+			desc:       "all hops trusted resolves to the leftmost trusted hop",
+			cfg:        &Config{TrustedProxyRanges: trusted},
+			remoteAddr: "198.51.100.2:443",
+			headers:    http.Header{headerForwardedFor: {"198.51.100.4, 198.51.100.3"}},
+			want: map[string][]string{
+				headerForwardedFor: {"198.51.100.4"},
+				headerRealIP:       {"198.51.100.4"},
+			},
+		},
+		{
+			desc:       "all hops trusted with a valid CF-Connecting-IP resolves to CF-Connecting-IP",
+			cfg:        &Config{TrustedProxyRanges: trusted},
+			remoteAddr: "198.51.100.2:443",
+			headers: http.Header{
+				headerForwardedFor:   {"198.51.100.3"},
+				headerCFConnectingIP: {"203.0.113.9"},
+			},
+			want: map[string][]string{
+				headerForwardedFor:   {"203.0.113.9"},
+				headerCFConnectingIP: {"203.0.113.9"},
+			},
+		},
+		{
+			desc:       "forged trusted-looking XFF and CF-Connecting-IP through an appending LB resolve to the attacker",
+			cfg:        &Config{TrustedProxyRanges: trusted},
+			remoteAddr: "198.51.100.2:443",
+			headers: http.Header{
+				headerForwardedFor:   {"198.51.100.3, 203.0.113.66"},
+				headerCFConnectingIP: {"10.0.0.5"},
+			},
+			want: map[string][]string{
+				headerForwardedFor:   {"203.0.113.66"},
+				headerRealIP:         {"203.0.113.66"},
+				headerCFConnectingIP: {"203.0.113.66"},
+			},
+		},
+		{
+			desc:       "forged Cloudflare XFF entry and CF-Connecting-IP through an appending LB resolve to the attacker",
+			cfg:        &Config{TrustedProxyRanges: trusted},
+			remoteAddr: "198.51.100.2:443",
+			headers: http.Header{
+				headerForwardedFor:   {"173.245.48.5, 203.0.113.66"},
+				headerCFConnectingIP: {"10.0.0.5"},
+			},
+			want: map[string][]string{
+				headerForwardedFor:   {"203.0.113.66"},
+				headerRealIP:         {"203.0.113.66"},
+				headerCFConnectingIP: {"203.0.113.66"},
+			},
+		},
+		{
+			desc:       "junk entry appended by a trusted proxy stops the walk at that proxy",
+			cfg:        &Config{TrustedProxyRanges: trusted},
+			remoteAddr: "198.51.100.2:443",
+			headers: http.Header{
+				headerForwardedFor:   {"203.0.113.9, unknown"},
+				headerCFConnectingIP: {"10.0.0.5"},
+			},
+			want: map[string][]string{
+				headerForwardedFor:   {"198.51.100.2"},
+				headerCFConnectingIP: {"198.51.100.2"},
+			},
+		},
+		{
+			desc:       "custom True-Client-IP header is set to the client on the trusted path",
+			cfg:        &Config{TrustedProxyRanges: trusted, Header: headerTrueClientIP},
+			remoteAddr: "198.51.100.2:443",
+			headers:    http.Header{headerForwardedFor: {"203.0.113.9"}},
+			want: map[string][]string{
+				headerForwardedFor: {"203.0.113.9"},
+				headerRealIP:       {"203.0.113.9"},
+				headerTrueClientIP: {"203.0.113.9"},
+			},
+		},
+		{
+			desc:       "existing True-Client-IP is rewritten to the client on the trusted path",
+			cfg:        &Config{TrustedProxyRanges: trusted},
+			remoteAddr: "198.51.100.2:443",
+			headers: http.Header{
+				headerForwardedFor: {"203.0.113.9"},
+				headerTrueClientIP: {"10.0.0.5"},
+			},
+			want: map[string][]string{
+				headerForwardedFor: {"203.0.113.9"},
+				headerTrueClientIP: {"203.0.113.9"},
+			},
+		},
+		{
+			desc:       "CF-Connecting-IPv6 is kept when the client came from CF-Connecting-IP",
+			cfg:        &Config{TrustedProxyRanges: trusted},
+			remoteAddr: "173.245.48.10:443",
+			headers: http.Header{
+				headerCFConnectingIP:   {"203.0.113.9"},
+				headerCFConnectingIPv6: {"2001:db8::5"},
+			},
+			want: map[string][]string{
+				headerForwardedFor:     {"203.0.113.9"},
+				headerCFConnectingIP:   {"203.0.113.9"},
+				headerCFConnectingIPv6: {"2001:db8::5"},
+			},
+		},
+		{
+			desc:       "XFF entry with an IPv4 address and port",
+			cfg:        &Config{TrustedProxyRanges: trusted},
+			remoteAddr: "198.51.100.2:443",
+			headers:    http.Header{headerForwardedFor: {"203.0.113.9:51234"}},
+			want: map[string][]string{
+				headerForwardedFor: {"203.0.113.9"},
+				headerRealIP:       {"203.0.113.9"},
+			},
+		},
+		{
+			desc:       "XFF entry with an IPv6 address and port",
+			cfg:        &Config{TrustedProxyRanges: trusted},
+			remoteAddr: "198.51.100.2:443",
+			headers:    http.Header{headerForwardedFor: {"[2001:db8::9]:443"}},
+			want: map[string][]string{
+				headerForwardedFor: {"2001:db8::9"},
+				headerRealIP:       {"2001:db8::9"},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.desc, func(t *testing.T) {
+			got := serveRequest(t, test.cfg, test.remoteAddr, test.headers)
+			assertHeaders(t, got, test.want)
+		})
+	}
+}
+
+func TestParseHopIP(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"203.0.113.9", "203.0.113.9"},
+		{"2001:db8::9", "2001:db8::9"},
+		{"203.0.113.9:5678", "203.0.113.9"},
+		{"[2001:db8::9]:443", "2001:db8::9"},
+		{"unknown", ""},
+		{"_hidden", ""},
+		{"203.0.113.9:abc:def", ""},
+	}
+	for _, test := range tests {
+		t.Run(test.input, func(t *testing.T) {
+			got := ""
+			if ip := parseHopIP(test.input); ip != nil {
+				got = ip.String()
+			}
+			if got != test.want {
+				t.Errorf("parseHopIP(%q) = %q want %q", test.input, got, test.want)
+			}
+		})
+	}
+}
+
+func TestIsBroadCIDR(t *testing.T) {
+	tests := []struct {
+		cidr string
+		want bool
+	}{
+		{"0.0.0.0/0", true},
+		{"10.0.0.0/7", true},
+		{"10.0.0.0/8", false},
+		{"198.51.100.0/29", false},
+		{"::/0", true},
+		{"2001::/15", true},
+		{"2001::/16", false},
+		{"2400:cb00::/32", false},
+	}
+	for _, test := range tests {
+		t.Run(test.cidr, func(t *testing.T) {
+			_, n, err := net.ParseCIDR(test.cidr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := isBroadCIDR(n); got != test.want {
+				t.Errorf("isBroadCIDR(%s) = %v want %v", test.cidr, got, test.want)
+			}
+		})
+	}
+}
+
+func TestNew_broadTrustedRangeStillLoads(t *testing.T) {
+	cfg := &Config{TrustedProxyRanges: []string{"0.0.0.0/0", "::/0"}}
+	got := serveRequest(t, cfg, "203.0.113.9:5555", http.Header{headerForwardedFor: {"10.0.0.5"}})
+	assertHeaders(t, got, map[string][]string{headerForwardedFor: {"10.0.0.5"}})
 }
